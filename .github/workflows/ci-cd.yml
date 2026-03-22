@@ -1,0 +1,158 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run TypeScript type check
+        run: npm run type-check
+
+      - name: Lint code
+        run: npm run lint --if-present
+
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    needs: lint
+    services:
+      mongodb:
+        image: mongo:8.0
+        options: >-
+          --health-cmd mongosh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 27017:27017
+        env:
+          MONGO_INITDB_ROOT_USERNAME: root
+          MONGO_INITDB_ROOT_PASSWORD: root
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Run tests
+        env:
+          NODE_ENV: test
+          MONGO_URI: mongodb://root:root@localhost:27017/whatsapp_saas_test?authSource=admin
+          JWT_SECRET: test-secret-min-32-characters-required-here
+          ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+        run: npm test --if-present
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        if: always()
+        with:
+          files: ./coverage/lcov.info
+          fail_ci_if_error: false
+
+  docker:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit dependencies
+        run: npm audit --production
+        continue-on-error: true
+
+  deploy:
+    name: Deploy to Render.com
+    runs-on: ubuntu-latest
+    needs: [build, docker, security-scan]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trigger Render.com deployment
+        run: |
+          curl --request POST \
+            --url ${{ secrets.RENDER_DEPLOY_WEBHOOK }} \
+            --header 'content-type: application/json' \
+            -d '{"commit": "${{ github.sha }}", "ref": "${{ github.ref }}"}'
+        if: secrets.RENDER_DEPLOY_WEBHOOK != ''
+
+      - name: Log deployment initiation
+        run: echo "Deployment webhook triggered for commit ${{ github.sha }}"
+
+  notify:
+    name: Notify on Status
+    runs-on: ubuntu-latest
+    needs: [lint, build, deploy]
+    if: always()
+    steps:
+      - name: Check build status
+        run: |
+          if [ "${{ needs.build.result }}" == "failure" ]; then
+            echo "Build failed"
+            exit 1
+          fi
+
+      - name: Notify success
+        if: success()
+        run: echo "All checks passed! Deployment initiated."
+
+# Secrets needed in GitHub:
+# RENDER_DEPLOY_WEBHOOK: Webhook URL from Render.com for auto-deployment
+#   Get from: Render.com Dashboard → Web Service → Settings → Deploy Hook

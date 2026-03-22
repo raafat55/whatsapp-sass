@@ -1,0 +1,1046 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "WhatsApp AI SaaS API",
+    "description": "Multi-tenant WhatsApp sessions, contacts, send-message, and Gemini AI agents (one agent per session). Use **Authorize** with a JWT from `/api/auth/login` or `/api/auth/register`. All successful JSON responses use `{ \"success\": true, \"data\": ... }` unless noted.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Local (change in Swagger if needed)"
+    }
+  ],
+  "tags": [
+    { "name": "Auth", "description": "Register and login (no JWT required)" },
+    {
+      "name": "Messaging",
+      "description": "Send outbound WhatsApp text; session must be **connected**. Uses `POST /api/sessions/{publicId}/send`."
+    },
+    { "name": "Sessions", "description": "WhatsApp Baileys sessions (create, list, QR, start/stop)" },
+    { "name": "Contacts", "description": "Per-session contacts" },
+    { "name": "AI Agents", "description": "Gemini auto-reply — at most one agent per session" },
+    { "name": "System", "description": "Health and API metadata" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Paste token only (Swagger adds Bearer prefix)"
+      }
+    },
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "required": ["success", "error"],
+        "properties": {
+          "success": { "type": "boolean", "enum": [false] },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" }
+            }
+          }
+        }
+      },
+      "AuthPayload": {
+        "type": "object",
+        "properties": {
+          "token": { "type": "string" },
+          "user": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "email": { "type": "string", "format": "email" }
+            }
+          }
+        }
+      },
+      "AuthResponse": {
+        "type": "object",
+        "required": ["success", "data"],
+        "properties": {
+          "success": { "type": "boolean", "enum": [true] },
+          "data": { "$ref": "#/components/schemas/AuthPayload" }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "sessionId": { "type": "string", "format": "uuid", "description": "Public session id (UUID)" },
+          "status": {
+            "type": "string",
+            "description": "e.g. disconnected, connecting, qr_pending, connected"
+          },
+          "phoneNumber": { "type": "string", "nullable": true },
+          "label": { "type": "string" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "SessionResponse": {
+        "type": "object",
+        "required": ["success", "data"],
+        "properties": {
+          "success": { "type": "boolean", "enum": [true] },
+          "data": { "$ref": "#/components/schemas/Session" }
+        }
+      },
+      "SessionListResponse": {
+        "type": "object",
+        "required": ["success", "data"],
+        "properties": {
+          "success": { "type": "boolean", "enum": [true] },
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Session" }
+          }
+        }
+      },
+      "OkTrue": {
+        "type": "object",
+        "required": ["success", "data"],
+        "properties": {
+          "success": { "type": "boolean", "enum": [true] },
+          "data": {
+            "type": "object",
+            "properties": { "ok": { "type": "boolean", "enum": [true] } }
+          }
+        }
+      },
+      "SyncContactsData": {
+        "type": "object",
+        "properties": {
+          "upserted": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "ContactItem": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "description": "MongoDB ObjectId (hex)" },
+          "phoneNumber": { "type": "string" },
+          "name": { "type": "string" },
+          "isBusiness": { "type": "boolean" },
+          "lastSeen": { "type": "string", "format": "date-time" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ContactListData": {
+        "type": "object",
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/ContactItem" } },
+          "total": { "type": "integer" },
+          "page": { "type": "integer" },
+          "limit": { "type": "integer" }
+        }
+      },
+      "ContactListResponse": {
+        "type": "object",
+        "required": ["success", "data"],
+        "properties": {
+          "success": { "type": "boolean", "enum": [true] },
+          "data": { "$ref": "#/components/schemas/ContactListData" }
+        }
+      },
+      "SendMessageBody": {
+        "type": "object",
+        "required": ["to", "text"],
+        "properties": {
+          "to": {
+            "type": "string",
+            "minLength": 5,
+            "maxLength": 64,
+            "description": "E.164-style digits or full WhatsApp JID"
+          },
+          "text": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        }
+      },
+      "AiAgentPublic": {
+        "type": "object",
+        "properties": {
+          "agentId": { "type": "string" },
+          "sessionPublicId": { "type": "string", "format": "uuid" },
+          "sessionLabel": { "type": "string" },
+          "displayName": { "type": "string" },
+          "businessName": { "type": "string" },
+          "businessDescription": { "type": "string" },
+          "languagePreference": { "type": "string", "example": "en" },
+          "toneOfVoice": { "type": "string", "example": "professional" },
+          "extraInstructions": { "type": "string" },
+          "modelName": { "type": "string" },
+          "enabled": { "type": "boolean" },
+          "hasGeminiKey": { "type": "boolean", "description": "Whether a key is stored (never returned)" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "AiAgentResponse": {
+        "type": "object",
+        "required": ["success", "data"],
+        "properties": {
+          "success": { "type": "boolean", "enum": [true] },
+          "data": { "$ref": "#/components/schemas/AiAgentPublic" }
+        }
+      },
+      "AiAgentListResponse": {
+        "type": "object",
+        "required": ["success", "data"],
+        "properties": {
+          "success": { "type": "boolean", "enum": [true] },
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/AiAgentPublic" }
+          }
+        }
+      },
+      "AgentPutBody": {
+        "type": "object",
+        "required": ["businessName", "businessDescription", "languagePreference", "toneOfVoice"],
+        "properties": {
+          "geminiApiKey": {
+            "type": "string",
+            "minLength": 10,
+            "description": "Required when creating an agent; omit on full update to keep existing encrypted key"
+          },
+          "displayName": { "type": "string", "maxLength": 120 },
+          "businessName": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "businessDescription": { "type": "string", "minLength": 1, "maxLength": 8000 },
+          "languagePreference": { "type": "string", "minLength": 2, "maxLength": 32 },
+          "toneOfVoice": { "type": "string", "minLength": 2, "maxLength": 80 },
+          "extraInstructions": { "type": "string", "maxLength": 4000 },
+          "modelName": { "type": "string", "minLength": 3, "maxLength": 80 },
+          "enabled": { "type": "boolean" }
+        }
+      },
+      "AgentPatchBody": {
+        "type": "object",
+        "minProperties": 1,
+        "properties": {
+          "geminiApiKey": { "type": "string", "minLength": 10 },
+          "displayName": { "type": "string", "maxLength": 120 },
+          "businessName": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "businessDescription": { "type": "string", "minLength": 1, "maxLength": 8000 },
+          "languagePreference": { "type": "string", "minLength": 2, "maxLength": 32 },
+          "toneOfVoice": { "type": "string", "minLength": 2, "maxLength": 80 },
+          "extraInstructions": { "type": "string", "maxLength": 4000 },
+          "modelName": { "type": "string", "minLength": 3, "maxLength": 80 },
+          "enabled": { "type": "boolean" }
+        }
+      },
+      "ApiRootInfo": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "name": { "type": "string" },
+          "health": { "type": "string" },
+          "api": { "type": "string" },
+          "swagger": { "type": "string" },
+          "openapi": { "type": "string" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": ["System"],
+        "summary": "Health check",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "ok": { "type": "boolean", "enum": [true] } }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/": {
+      "get": {
+        "tags": ["System"],
+        "summary": "API metadata",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiRootInfo" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/register": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Register",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email", "password"],
+                "properties": {
+                  "email": { "type": "string", "format": "email" },
+                  "password": { "type": "string", "minLength": 8 }
+                }
+              },
+              "example": { "email": "user@example.com", "password": "yourpassword12" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AuthResponse" }
+              }
+            }
+          },
+          "409": {
+            "description": "Email already registered",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "Login",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["email", "password"],
+                "properties": {
+                  "email": { "type": "string", "format": "email" },
+                  "password": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AuthResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions": {
+      "post": {
+        "tags": ["Sessions"],
+        "summary": "Create session",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "label": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": ["Sessions"],
+        "summary": "List sessions",
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionListResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{publicId}": {
+      "get": {
+        "tags": ["Sessions"],
+        "summary": "Get session",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "publicId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": ["Sessions"],
+        "summary": "Delete session (logout WhatsApp, wipe auth state, remove related data)",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "publicId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OkTrue" }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{publicId}/start": {
+      "post": {
+        "tags": ["Sessions"],
+        "summary": "Start Baileys (scan QR in server logs)",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "publicId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK — returns updated session",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{publicId}/stop": {
+      "post": {
+        "tags": ["Sessions"],
+        "summary": "Stop socket",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "publicId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OkTrue" }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{publicId}/send": {
+      "post": {
+        "tags": ["Messaging"],
+        "summary": "Send WhatsApp text message",
+        "operationId": "sendWhatsAppMessage",
+        "description": "Requires an active WhatsApp connection (`status` = `connected`). Body: `to` (phone digits or JID) and `text`.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "publicId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SendMessageBody" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OkTrue" }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "409": {
+            "description": "SESSION_OFFLINE — WhatsApp not connected",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{publicId}/ai-agent": {
+      "get": {
+        "tags": ["AI Agents"],
+        "summary": "Get AI agent for session",
+        "description": "Never returns the Gemini API key; use `hasGeminiKey` to see if one is stored.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "publicId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AiAgentResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "SESSION_NOT_FOUND or AGENT_NOT_FOUND",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": ["AI Agents"],
+        "summary": "Create or replace AI agent for session",
+        "description": "`geminiApiKey` is required when no agent exists yet; omit on update to keep the existing encrypted key.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "publicId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AgentPutBody" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AiAgentResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation or GEMINI_KEY_REQUIRED on create",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": ["AI Agents"],
+        "summary": "Partial update (enable/disable, business fields, rotate Gemini key)",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "publicId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AgentPatchBody" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AiAgentResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "Session or agent not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation (e.g. empty patch)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": ["AI Agents"],
+        "summary": "Remove agent from session (unassign)",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "publicId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OkTrue" }
+              }
+            }
+          },
+          "404": {
+            "description": "Session or agent not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ai-agents": {
+      "get": {
+        "tags": ["AI Agents"],
+        "summary": "List all AI agents for the current user",
+        "description": "One row per session that has an agent; includes `sessionPublicId` and `sessionLabel`.",
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AiAgentListResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/contacts/{sessionId}/sync": {
+      "post": {
+        "tags": ["Contacts"],
+        "summary": "Sync contacts from WhatsApp snapshot",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "description": "Session public UUID",
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["success", "data"],
+                  "properties": {
+                    "success": { "type": "boolean", "enum": [true] },
+                    "data": { "$ref": "#/components/schemas/SyncContactsData" }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "SESSION_OFFLINE",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/contacts/{sessionId}": {
+      "get": {
+        "tags": ["Contacts"],
+        "summary": "List contacts",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "default": 50, "minimum": 1, "maximum": 200 }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "schema": { "type": "integer", "default": 1, "minimum": 1 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ContactListResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query (limit/page)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/contacts/{contactId}": {
+      "delete": {
+        "tags": ["Contacts"],
+        "summary": "Delete contact",
+        "description": "`contactId` is the MongoDB ObjectId (24 hex chars), not the session UUID.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "contactId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[a-fA-F0-9]{24}$" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/OkTrue" }
+              }
+            }
+          },
+          "400": {
+            "description": "INVALID_ID",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "404": {
+            "description": "Contact not found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ApiError" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
